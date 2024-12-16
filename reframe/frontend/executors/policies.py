@@ -8,6 +8,11 @@ import math
 import sys
 import time
 
+# Cicada Dennis 2024-12-12
+# Added next two items to support using multiple threads to run tasks.
+import threading
+import os
+
 import reframe.core.runtime as rt
 import reframe.utility as util
 from reframe.core.exceptions import (FailureLimitError,
@@ -425,26 +430,72 @@ class AsynchronousExecutionPolicy(ExecutionPolicy, TaskEventListener):
             return True
 
     def _advance_all(self, tasks, timeout=None):
+
+        # The following code was made into a function in order to support threading startup tasks.
+        def _handle_task(t,task_index,results):
+            old_state = t.state
+            bump_state = getattr(self, f'_advance_{t.state}')
+            num_progressed = bump_state(t)
+            new_state = t.state
+            results[task_index]=(old_state, new_state, num_progressed)
+
         t_init = time.time()
+        t_elapsed = 0
         num_progressed = 0
+        cpus_avail = os.cpu_count() # Cicada added to support threading
 
         getlogger().debug2(f'Current tests: {len(tasks)}')
 
         # We take a snapshot of the tasks to advance by doing a shallow copy,
         # since the tasks may removed by the individual advance functions.
-        for t in list(tasks):
-            old_state = t.state
-            bump_state = getattr(self, f'_advance_{t.state}')
-            num_progressed += bump_state(t)
-            new_state = t.state
+        # New way of looping through the task list to support threading.
+        task_list = list(tasks)
+        task_index = 0
+        results = [None] * len(task_list)
+        while task_index < len(task_list):
+            current_state = task_list[task_index].state
+            if (current_state in ['startup']):
+                # We can run startup tasks in multiple threads to speed them up.
+                # With hundreds of startup tasks, the file I/O can end up taking a considerable amount of time
+                # when they are processed sequentially, waiting for file I/O (making directories, writing out scripts).
+                first_task_in_this_loop = task_index
+                # Make one workerbee (thread) for each available cpu.
+                # In actuality, since we are probably not cpu bound in this situation,
+                # we could probably use more than one thread per cpu.
+                workerbees = [] # This is where we will store the thread objects we create.
+                # The results from each task will get placed in the results list as a three value tuple indexed by the task_index
+                # The values will be (old_state, new_state, num_progressed)
+                for i in range(0, cpus_avail):
+                    workerbees.append(threading.Thread(target=_handle_task, args=(task_list[task_index],task_index,results,)))
+                    workerbees[-1].start()
+                    task_index += 1
+                    if task_index < len(task_list):
+                        current_state = task_list[task_index].state
+                        # Otherwise, I think it is ok for the current_state to be the same as it was.
+                        if (current_state not in ['startup']):
+                            break # out of for loop. We don't want to process non-startup tasks using threads.
+                    else: # (task_index >= len(task_list))
+                        break # out of for loop. We don't want to exceed the number of tasks.
+                for worker in workerbees:
+                    worker.join()
+                if self._pipeline_statistics:
+                    for i in range(first_task_in_this_loop, task_index):
+                        # Not sure why 1 is used instead of num_progressed.
+                        self._update_pipeline_progress(results[i,0], results[i,1], 1)
+                        num_progressed += results[i,2]
+            else: # Do sequential processing of tasks.
+                _handle_task(task_list[task_index],task_index,results)
+                if self._pipeline_statistics:
+                    # Not sure why 1 is used instead of num_progressed.
+                    self._update_pipeline_progress(results[task_index,0], results[task_index,1], 1)
+                    num_progressed += results[task_index,2]
+                task_index += 1
+            # End of check for task's state.
 
             t_elapsed = time.time() - t_init
             if timeout and t_elapsed > timeout and num_progressed:
-                break
-
-            if self._pipeline_statistics:
-                self._update_pipeline_progress(old_state, new_state, 1)
-
+                 break # out of while loop.
+        # end of while loop
         getlogger().debug2(f'Bumped {num_progressed} test(s)')
 
     def _advance_startup(self, task):
