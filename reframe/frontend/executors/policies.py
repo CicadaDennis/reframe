@@ -454,7 +454,11 @@ class AsynchronousExecutionPolicy(ExecutionPolicy, TaskEventListener):
         results = [None] * len(task_list)
         while task_index < len(task_list):
             current_state = task_list[task_index].state
-            if (current_state in ['startup']):
+            # I have tried using this threading option for other states, but it is problematic.
+            # Errors occur when any of the other states are added.
+            #threadable_states = ['startup', 'ready_compile', 'ready_run']
+            threadable_states = ['startup']
+            if (current_state in threadable_states):
                 # We can run startup tasks in multiple threads to speed them up.
                 # With hundreds of startup tasks, the file I/O can end up taking a considerable amount of time
                 # when they are processed sequentially, waiting for file I/O (making directories, writing out scripts).
@@ -472,8 +476,8 @@ class AsynchronousExecutionPolicy(ExecutionPolicy, TaskEventListener):
                     if task_index < len(task_list):
                         current_state = task_list[task_index].state
                         # Otherwise, I think it is ok for the current_state to be the same as it was.
-                        if (current_state not in ['startup']):
-                            break # out of for loop. We don't want to process non-startup tasks using threads.
+                        if (current_state not in threadable_states):
+                            break # out of for loop. We don't want to process non-threadable tasks using threads.
                     else: # (task_index >= len(task_list))
                         break # out of for loop. We don't want to exceed the number of tasks.
                 for worker in workerbees:
